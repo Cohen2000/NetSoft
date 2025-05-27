@@ -203,10 +203,17 @@ class L3Switch(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-    def do_ip(self, datapath, in_port, packet, eth, ip_packet):
+    def do_ip(self, datapath, in_port, packet, eth, ip_packet, buffer_id=None):
         dpid = datapath.id
         dst_ip = ip_packet.dst
         src_ip = ip_packet.src
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        # check TTL
+        if ip_packet.ttl <= 1:
+            self.logger.info(f"TTL expired for packet from {src_ip} to {dst_ip}, dropping packet")
+            return
 
         # Determine which subnet the destination IP belongs to
         if dst_ip.startswith('10.0.1'):
@@ -228,16 +235,21 @@ class L3Switch(app_manager.RyuApp):
             out_port = self.mac_to_port[dpid][dst_mac]
 
             if out_port:
-                # construct new ethernet frame with updated MAC adress
-                new_eth = ethernet.ethernet(dst=dst_mac, src=self.MAC_ADDR, ethertype=eth.ethertype)
-                new_packet = Packet()
-                new_packet.add_protocol(new_eth)
-                new_packet.add_protocol(ip_packet)
-                new_packet.serialize()
-
-                # send the packet to destination 
-                self.send_packet(datapath=datapath, port=out_port, pkt=new_packet)
-                self.logger.info(f"Routed IP packet from {src_ip} to {dst_ip} via port {out_port}")
+                match = parser.OFPMatch(
+                    eth_type=ether_types.ETH_TYPE_IP,
+                    ipv4_dst=dst_ip
+                )
+                
+                actions = [
+                    parser.OFPActionDecNwTtl(),  # decrement TTL
+                    parser.OFPActionSetField(eth_src=self.MAC_ADDR),  
+                    parser.OFPActionSetField(eth_dst=dst_mac),  
+                    parser.OFPActionOutput(out_port)
+                ]
+                
+                # install flow
+                self.add_flow(datapath, 10, match, actions, buffer_id)
+                self.logger.info(f"Installed IP routing flow for destination {dst_ip} via port {out_port} - packet auto-forwarded")
             else:
                 self.logger.info("Out port for IP %s unknown", dst_ip)
         else:
@@ -253,7 +265,6 @@ class L3Switch(app_manager.RyuApp):
                 dstIp=dst_ip,                      
                 outPort=datapath.ofproto.OFPP_FLOOD 
             )
-            self.logger.info(f"Packet to {dst_ip} will be delivered after ARP resolution")
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
