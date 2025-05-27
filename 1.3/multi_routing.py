@@ -20,94 +20,43 @@ class L3Switch(app_manager.RyuApp):
         self.mac_to_port = {}
         self.ip_to_mac = {}
         
-        self.routing_table = {
-            1: [  # OFS1
-                {'network': '10.0.1.0/28', 'next_hop': None, 'port': 2, 'gateway_ip': '10.0.1.14'},
-                {'network': '10.0.2.0/24', 'next_hop': None, 'port': 1, 'gateway_ip': '10.0.2.254'},
-                {'network': '10.0.3.0/26', 'next_hop': None, 'port': 3, 'gateway_ip': '10.0.3.62'},
-                {'network': '10.0.4.0/30', 'next_hop': '10.0.2.252', 'port': 1, 'gateway_ip': '10.0.2.254'}
-            ],
-            2: [  # OFS2
-                {'network': '10.0.2.0/24', 'next_hop': None, 'port': 2, 'gateway_ip': '10.0.2.252'},
-                {'network': '10.0.3.0/26', 'next_hop': '10.0.2.254', 'port': 2, 'gateway_ip': '10.0.2.252'},
-                {'network': '10.0.1.0/28', 'next_hop': '10.0.2.254', 'port': 2, 'gateway_ip': '10.0.2.252'},
-                {'network': '10.0.4.0/30', 'next_hop': None, 'port': 1, 'gateway_ip': '10.0.4.2'}
-            ]
-        }
-        
+        # switch interfaces (gateway_ip, gateway_mac, network)
         self.gateway_interfaces = {
-            1: {  # OFS1
-                '10.0.1.14': '52:00:00:00:00:11',
-                '10.0.2.254': '52:00:00:00:00:12',
-                '10.0.3.62': '52:00:00:00:00:13'
-            },
-            2: {  # OFS2
-                '10.0.2.252': '52:00:00:00:00:21',
-                '10.0.4.2': '52:00:00:00:00:23'
-            }
+            # OFS1 (dpid=1) is directly connected to Network1, Network2, Network3
+            1: [
+                ("10.0.1.14", "00:00:00:00:01:0A", ipaddress.IPv4Network('10.0.1.0/28')),
+                ("10.0.2.254", "00:00:00:00:01:FE", ipaddress.IPv4Network('10.0.2.0/24')), 
+                ("10.0.3.62", "00:00:00:00:03:3E", ipaddress.IPv4Network('10.0.3.0/26')),  
+            ],
+            # OFS2 (dpid=2) is directly connected to Network2 and Network4
+            2: [
+                ("10.0.2.252", "00:00:00:00:02:FC", ipaddress.IPv4Network('10.0.2.0/24')), 
+                ("10.0.4.2", "00:00:00:00:04:02", ipaddress.IPv4Network('10.0.4.0/30')), 
+            ],
         }
-
-        self.gateway_port_mapping = {
-            1: {
-                '10.0.1.14': 2,
-                '10.0.2.254': 1,
-                '10.0.3.62': 3
-            },
-            2: {
-                '10.0.4.2': 1
-            }
+        # routing tables for the two switches (network, outPort, nextHop)
+        self.routing_table = {
+            # OFS1: direct nets 1,2,3; net4 via Network2 (port to OFS2)
+            1: [
+                (ipaddress.IPv4Network('10.0.1.0/28'), 2, None),  # Network1: /28
+                (ipaddress.IPv4Network('10.0.2.0/24'), 1, None),  # Network2: /24
+                (ipaddress.IPv4Network('10.0.3.0/26'), 3, None),  # Network3: /26
+                (ipaddress.IPv4Network('10.0.4.0/30'), 4, '10.0.2.252'),  # Network4 via OFS2 through Network2
+            ],
+            # OFS2: direct nets 2,4; net1 & net3 via Network2 (port to OFS1)
+            2: [
+                (ipaddress.IPv4Network('10.0.1.0/28'), 3, '10.0.2.254'),  # Network1 via OFS1 through Network2
+                (ipaddress.IPv4Network('10.0.2.0/24'), 3, '10.0.2.254'),  # Network2: via OFS1 through Network2
+                (ipaddress.IPv4Network('10.0.3.0/26'), 3, '10.0.2.254'),  # Network3 via OFS1 through Network2
+                (ipaddress.IPv4Network('10.0.4.0/30'), 1, None),  # Network4: /30
+            ],
         }
-
-    def initial_setup(self, datapath):
-        dpid = datapath.id
-        ofproto = datapath.ofproto
-
-        self.logger.info(f"Running initial ARP setup for switch {dpid}")
-
-        if dpid not in self.gateway_port_mapping:
-            return
-        
-        for ip, port in self.gateway_port_mapping[dpid].items():
-            src_mac = self.gateway_interfaces[dpid][ip]
-            
-            # Finde das Netzwerk zu dieser IP in der routing_table
-            network = None
-            for route in self.routing_table.get(dpid, []):
-                if route['gateway_ip'] == ip:
-                    network = route['network']
-                    break
-            
-            if network is None:
-                self.logger.warning(f"No network found for gateway IP {ip} on switch {dpid}")
-                continue
-            
-            # Wähle eine Ziel-IP für den ARP-Request - z.B. die erste Host-IP im Subnetz
-            # Achtung: .hosts() ist ein Generator, konvertiere zu Liste oder nimm next()
-            dst_ip = next(ipaddress.ip_network(network).hosts(), None)
-            if dst_ip is None:
-                self.logger.warning(f"No host IP found in network {network} for ARP request")
-                continue
-
-            # Broadcast-ARP-Request auf jedes Subnetz
-            self.logger.info(f"Sending ARP request from {ip} ({src_mac}) out of port {port}")
-            self.send_arp(
-                datapath=datapath,
-                opcode=1,
-                srcMac=src_mac,
-                srcIp=ip,
-                dstMac='FF:FF:FF:FF:FF:FF',
-                dstIp=dst_ip,  
-                outPort=port
-                )
-
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-
-        self.initial_setup(datapath)
 
         # install table-miss flow entry
         #
@@ -161,49 +110,40 @@ class L3Switch(app_manager.RyuApp):
 
         datapath.send_msg(out)
 
-    def do_arp(self, datapath, packet, frame, inPort):
+    def do_arp(self, datapath, pkt, eth, in_port):
         dpid = datapath.id
-        ofproto = datapath.ofproto
+        ofp = datapath.ofproto
         parser = datapath.ofproto_parser
+        arp_pkt = pkt.get_protocol(arp)
+        # Always learn sender
+        self.mac_to_port.setdefault(dpid, {})[eth.src] = in_port
+        self.ip_to_mac.setdefault(dpid, {})[arp_pkt.src_ip] = eth.src
 
-        arp_packet = packet.get_protocol(arp)
-        src_mac = frame.src
-        src_ip = arp_packet.src_ip
-        dst_ip = arp_packet.dst_ip
-        
+        # Handle ARP request to gateway IPs
+        if arp_pkt.opcode == 1:
+            for gw_ip, gw_mac, _ in self.gateway_interfaces[dpid]:
+                if arp_pkt.dst_ip == gw_ip:
+                    # Send ARP reply from gateway
+                    reply = Packet()
+                    reply.add_protocol(ethernet.ethernet(
+                        ethertype=ether_types.ETH_TYPE_ARP,
+                        dst=eth.src, src=gw_mac))
+                    reply.add_protocol(arp(opcode=2,
+                        src_mac=gw_mac, src_ip=gw_ip,
+                        dst_mac=eth.src, dst_ip=arp_pkt.src_ip))
+                    self.send_packet(datapath, in_port, reply)
+                    return
+            # Not a gateway IP, fall through to flood for learning
+            self.send_packet(datapath, ofp.OFPP_FLOOD, pkt)
+            return
 
-        self.mac_to_port.setdefault(dpid, {})
-        self.ip_to_mac.setdefault(dpid, {})
+        # Handle ARP reply: learn mapping, no further action needed
+        if arp_pkt.opcode == 2:
+            # Mapping already learned above
+            self.logger.info(f"Learned ARP reply: {arp_pkt.src_ip} -> {eth.src} on port {in_port}")
+            return
 
-        self.mac_to_port[dpid][src_mac] = inPort
-        self.ip_to_mac[dpid][src_ip] = src_mac
-        self.logger.info(f"Learned ARP: {src_ip} is at {src_mac} on port {inPort}")
-
-        if dst_ip in self.gateway_interfaces.get(dpid, {}):
-            reply_mac = self.gateway_interfaces[dpid][dst_ip]
-
-            self.logger.info(f"Send ARP reply from {dst_ip} ({reply_mac}) to {src_ip} ({src_mac})")
-
-            self.send_arp(
-                datapath=datapath,
-                opcode=2,
-                srcMac=reply_mac,
-                srcIp=dst_ip,
-                dstMac=src_mac,
-                dstIp=src_ip,
-                outPort=inPort
-            )
-        else:
-            self.logger.info(f"ARP request for unknown IP {dst_ip}, flooding")
-            self.send_arp(
-                datapath=datapath,
-                opcode=1,
-                srcMac=src_mac,
-                srcIp=src_ip,
-                dstMac='FF:FF:FF:FF:FF:FF',
-                dstIp=dst_ip,
-                outPort=datapath.ofproto.OFPP_FLOOD
-            )
+        self.send_packet(datapath, ofp.OFPP_FLOOD, pkt)
 
     def send_arp(self, datapath, opcode, srcMac, srcIp, dstMac, dstIp, outPort):
         if opcode == 1:
@@ -221,26 +161,23 @@ class L3Switch(app_manager.RyuApp):
         self.send_packet(datapath, outPort, p)
 
     def do_icmp(self, datapath, port, pkt_ethernet, pkt_ipv4, pkt_icmp):
-        if pkt_icmp.type != icmp.ICMP_ECHO_REQUEST:
-            return
-        
+        ip_addr = pkt_ipv4.dst
         dpid = datapath.id
-        src_mac = self.gateway_interfaces[dpid][pkt_ipv4.dst]
-        src_ip = pkt_ipv4.dst
-
-        pkt = packet.Packet()
-        pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,
-                                           dst=pkt_ethernet.src,
-                                           src=src_mac))
-        pkt.add_protocol(ipv4.ipv4(dst=pkt_ipv4.src,
-                                   src=src_ip,
-                                   proto=pkt_ipv4.proto))
-        pkt.add_protocol(icmp.icmp(type_=icmp.ICMP_ECHO_REPLY,
-                                   code=icmp.ICMP_ECHO_REPLY_CODE,
-                                   csum=0,
-                                   data=pkt_icmp.data))
-        self.logger.info("do icmp: %s" %(pkt,))
-        self.send_packet(datapath, port, pkt)
+        if pkt_icmp.type == icmp.ICMP_ECHO_REQUEST and self.is_gateway_ip(ip_addr, dpid):
+            mac_addr = self.get_interface_mac(ip_addr, dpid)
+            pkt = packet.Packet()
+            pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,
+                                            dst=pkt_ethernet.src,
+                                            src=mac_addr))
+            pkt.add_protocol(ipv4.ipv4(dst=pkt_ipv4.src,
+                                    src=ip_addr,
+                                    proto=pkt_ipv4.proto))
+            pkt.add_protocol(icmp.icmp(type_=icmp.ICMP_ECHO_REPLY,
+                                    code=icmp.ICMP_ECHO_REPLY_CODE,
+                                    csum=0,
+                                    data=pkt_icmp.data))
+            self.logger.info("do icmp: %s" %(pkt,))
+            self.send_packet(datapath, port, pkt)
 
     def do_l2_switch(self, datapath, dpid, packet, frame, in_port, buffer_id=None):
         ofproto = datapath.ofproto
@@ -271,57 +208,103 @@ class L3Switch(app_manager.RyuApp):
                                   in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
 
-    def find_route(self, dpid, dst_ip_str):
-        ip_dst = ipaddress.ip_address(dst_ip_str)
-        best_match = None
-        for entry in self.routing_table.get(dpid, []):
-            if ip_dst in ipaddress.ip_network(entry['network']):
-                if not best_match or entry['network'].prefixlen > best_match['network'].prefixlen:
-                    best_match = entry
-        return best_match  # kann None sein, wenn kein Match gefunden wurde
+    def is_gateway_ip(self, ip, dpid):
+        return any(ip == gateway_ip for gateway_ip, _, _ in self.gateway_interfaces[dpid])
+    
+    def is_gateway_mac(self, mac, dpid):
+        return any(mac == gateway_mac for _, gateway_mac, _ in self.gateway_interfaces[dpid])
 
-    def do_ip(self, datapath, in_port, pkt, eth, ip_packet):
+    def get_interface_mac(self, ip, dpid):
+        for gateway_ip, gateway_mac, _ in self.gateway_interfaces[dpid]:
+            if gateway_ip == ip:
+                return gateway_mac
+
+    def get_transit_interface(self, dpid, next_hop_ip):
+        next_hop_addr = ipaddress.IPv4Address(next_hop_ip)
+        for gateway_ip, gateway_mac, network in self.gateway_interfaces[dpid]:
+            if next_hop_addr in network:
+                return (gateway_ip, gateway_mac)
+        return None
+    
+    def get_gateway_mac_for_network(self, dpid, target_network):
+        for gateway_ip, gateway_mac, network in self.gateway_interfaces[dpid]:
+            if target_network == network:
+                return gateway_mac
+        return None
+            
+    def route_packet(self, datapath, msg, pkt, eth, ip_pkt, in_port):
         dpid = datapath.id
-        dst_ip = ip_packet.dst
-        src_ip = ip_packet.src
+        parser = datapath.ofproto_parser
+        dst_ip = ipaddress.IPv4Address(ip_pkt.dst)
+        self.logger.info(f"route_packet invoked on dpid {dpid} for {dst_ip}")
 
-        route = self.find_route(dpid, dst_ip)
-        if not route:
-            self.logger.warning(f"No route for {dst_ip} on switch {dpid}")
+        # check TTL
+        if ip_pkt.ttl <= 1:
+            self.logger.info(f"TTL expired for packet from {src_ip} to {dst_ip}, dropping packet")
             return
-        
-        next_ip = dst_ip if route['next_hop'] is None else route['next_hop']
-        out_port = route['port']
 
-        gateway_ip_str = route['gateway_ip']
-        src_mac = self.gateway_interfaces[dpid].get(gateway_ip_str)
+        # search in the routing table
+        for network, out_port, next_hop_ip in self.routing_table.get(dpid, []):
+            if dst_ip in network:
+                self.logger.info(f"Match in {network}, out_port={out_port}, next_hop={next_hop_ip}")
+                next_hop_mac = None
 
-        if not src_mac:
-            self.logger.warning(f"No source MAC known for gateway IP {gateway_ip_str} on switch {dpid}")
-            return
-        
+                if next_hop_ip:
+                    next_hop_mac = self.ip_to_mac[dpid].get(next_hop_ip)
+                    if not next_hop_mac:
+                        transit_info = self.get_transit_interface(dpid, next_hop_ip)
+                        if transit_info:
+                            src_ip, src_mac = transit_info
+                            self.send_arp(datapath,
+                                        opcode=1,
+                                        srcMac=src_mac,
+                                        srcIp=src_ip,
+                                        dstMac="FF:FF:FF:FF:FF:FF",
+                                        dstIp=next_hop_ip,
+                                        outPort=out_port)
+                            self.logger.info(f"Sent ARP request for next hop {next_hop_ip} via port {out_port}")
+                            return False
+                        else:
+                            self.logger.warning(f"No transit interface found for next hop {next_hop_ip}")
+                            return False
+                else:
+                    # direct connected network
+                    next_hop_mac = self.ip_to_mac[dpid].get(ip_pkt.dst)
+                    if not next_hop_mac:
+                        for gateway_ip, gateway_mac, net in self.gateway_interfaces[dpid]:
+                            if net == network:
+                                self.send_arp(datapath, 1, gateway_mac, gateway_ip, "FF:FF:FF:FF:FF:FF", str(dst_ip), out_port)
+                                self.logger.info(f"Sent ARP request for target {dst_ip} on local network via port {out_port}")
+                                return False
+                        self.logger.warning(f"No gateway found for network {network}")
+                        return False
 
-        # MAC already known?
-        if next_ip in self.ip_to_mac[dpid]:
-            dst_mac = self.ip_to_mac[dpid][next_ip]
+                # install flow
+                match = parser.OFPMatch(
+                    eth_type=ether_types.ETH_TYPE_IP,
+                    ipv4_dst=(str(network.network_address), str(network.netmask)))
+                actions = []
 
-            new_eth = ethernet.ethernet(dst=dst_mac, src=src_mac, ethertype=eth.ethertype)
-            new_packet = packet.Packet()
-            new_packet.add_protocol(new_eth)
-            new_packet.add_protocol(ip_packet)
-            new_packet.serialize()
+                # decrement TTL
+                actions.append(parser.OFPActionDecNwTtl())
 
-            self.send_packet(datapath=datapath, port=out_port, pkt=new_packet)
-            self.logger.info(f"Sent IP packet from {src_ip} to {dst_ip} via port {out_port} (next hop: {next_ip})")
-        else:
-            # MAC unknown => send ARP request
-            self.logger.info(f"MAC for {next_ip} unknown, sending ARP")
-            self.send_arp(datapath, opcode=1,
-                        srcMac=src_mac,
-                        srcIp=gateway_ip_str,
-                        dstMac="FF:FF:FF:FF:FF:FF",
-                        dstIp=next_ip,
-                        outPort=out_port)
+                if next_hop_mac:
+                    gateway_mac = self.get_gateway_mac_for_network(dpid, network)
+                    if gateway_mac:
+                        actions.append(parser.OFPActionSetField(eth_src=gateway_mac))
+
+                    actions.append(parser.OFPActionSetField(eth_dst=next_hop_mac))
+
+                actions.append(parser.OFPActionOutput(out_port))
+                
+                buffer_id = msg.buffer_id if msg.buffer_id != datapath.ofproto.OFP_NO_BUFFER else None
+                self.add_flow(datapath, 10, match, actions, buffer_id=buffer_id)
+                self.logger.info(f"Flow installed for {dst_ip}: gateway_mac={gateway_mac}, next_hop_mac={next_hop_mac}, out_port={out_port}")
+                return True
+            
+        self.logger.info(f"No route found for {dst_ip}")
+        return False
+    
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
@@ -364,18 +347,19 @@ class L3Switch(app_manager.RyuApp):
         if eth.ethertype == ether_types.ETH_TYPE_IP:
             ipv4_pkt = pkt.get_protocol(ipv4.ipv4)
 
-
             #check if packet is for this switch
-            if str(ipv4_pkt.dst) in self.gateway_interfaces.get(dpid):
+            if self.is_gateway_ip(ipv4_pkt.dst, dpid):
                 icmp_pkt = pkt.get_protocol(icmp.icmp)
-                self.logger.info(f"ICMP packet: {icmp_pkt}")
                 if icmp_pkt:
                     self.do_icmp(datapath, in_port, eth, ipv4_pkt, icmp_pkt)
+                    return
             else:
                 # here we would forward the packet into other subnets
-                self.do_ip(datapath=datapath, in_port=in_port, pkt=pkt, eth=eth, ip_packet=ipv4_pkt)
+                if self.route_packet(datapath, msg, pkt, eth, ipv4_pkt, in_port):
+                    return 
 
-        # L2-Switching nur, wenn Ziel nicht eine unserer Gateway-MACs ist
-        if dst not in self.gateway_interfaces.get(dpid, {}).values():
+        # packet is not for this switch, so do l2 switching
+        if not self.is_gateway_mac(dst, dpid):
             self.do_l2_switch(datapath, dpid, pkt, eth, in_port, msg.buffer_id)
+            return
         return

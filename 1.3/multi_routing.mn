@@ -98,11 +98,6 @@
             "src": "h2"
         },
         {
-            "dest": "s2",
-            "opts": {},
-            "src": "h2"
-        },
-        {
             "dest": "s1",
             "opts": {},
             "src": "h1"
@@ -111,6 +106,11 @@
             "dest": "h3",
             "opts": {},
             "src": "s1"
+        },
+        {
+            "dest": "s1",
+            "opts": {},
+            "src": "s2"
         }
     ],
     "switches": [

@@ -36,9 +36,9 @@ def myNetwork():
     info( '*** Add links\n')
     net.addLink(s2, h4)
     net.addLink(h2, s1)
-    net.addLink(h2, s2)
     net.addLink(h1, s1)
     net.addLink(s1, h3)
+    net.addLink(s2, s1)
 
     info( '*** Starting network\n')
     net.build()
@@ -51,8 +51,6 @@ def myNetwork():
     net.get('s2').start([c0])
 
     info( '*** Post configure switches and hosts\n')
-    s1.cmdPrint('--no-local-ip')
-    s2.cmdPrint('--no-local-ip')
 
     CLI(net)
     net.stop()
