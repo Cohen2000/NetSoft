@@ -44,6 +44,7 @@ header prot_t {
 struct metadata {
     bit<32> node_id;
     bit<1>  should_clone;  // Flag für Cloning
+    bit<1>  prot_handled; 
     bit<32> clone_session; // Clone session ID
 }
 
@@ -237,7 +238,9 @@ control MyIngress(inout headers hdr,
         identify_node.apply();
 
         if (!hdr.outer_ipv4.isValid()) return;
-
+        
+        // reset flag
+        meta.prot_handled = 0;
         
         if (hdr.prot.isValid()){
             if (meta.node_id == 1 || meta.node_id == 3) { // tunnel endpoints
@@ -257,17 +260,25 @@ control MyIngress(inout headers hdr,
                     // Accept packet and update expected sequence
                     expected_seq.write(reg_idx, expected + 1);
                     protection_decap.apply();
+                    meta.prot_handled = 1;
+                    
                 } else {
                     // Drop duplicate
                     drop();
+                    return;
                 }
-            } else {
-                ipv4_lpm.apply();
             }
-            return;
         }
 
-        protection_encap.apply();
+        if (!hdr.prot.isValid() && (meta.node_id == 1 || meta.node_id == 3)) {
+            if (protection_encap.apply().hit) {
+                meta.prot_handled = 1;
+            }
+        }
+
+        if (meta.prot_handled == 0) {
+            ipv4_lpm.apply();
+        }
     }
 }
 
